@@ -521,11 +521,6 @@ if ($method === 'PUT') {
                     "Hello {$targetUser['name']}, your Memoria account has been Verified by an Administrator. You can now log-in to the system.",
                     true
                 );
-                if (!$smsStatus['success']) {
-                    systemLog("Failed to send verification SMS to User ID {$targetId}. Error: {$smsStatus['error']}", $userData['user_id']);
-                    echo json_encode(["success" => true, "sms_failed" => true, "message" => "Saved changes, but failed to send SMS, Recheck you textbee api key and device id. Error: " . $smsStatus['error']]);
-                    exit;
-                }
             }
         }
 

@@ -1,13 +1,30 @@
 <?php
-require_once 'notallowed.php';
+define('ITS_ME_JUSTTOVERIFY', true);
 require_once 'database.php'; // Make sure this path points to your database connection file
 $sql = <<<'SQL'
+
+-- =====================================================================
+-- SHARED TRIGGER FUNCTION  (emulates MySQL ON UPDATE CURRENT_TIMESTAMP)
+-- =====================================================================
+CREATE OR REPLACE FUNCTION set_updated_at()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    NEW.updated_at = CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$;
+
+
+-- =====================================================================
 -- USERS
+-- =====================================================================
 CREATE TABLE IF NOT EXISTS users (
     user_id SERIAL PRIMARY KEY,
     username VARCHAR(50) NOT NULL,
-    role VARCHAR(50) NOT NULL DEFAULT 'Grounds Staff' CHECK (role IN ('Administrator', 'Office Staff', 'Grounds Staff')),
-    status VARCHAR(50) NOT NULL DEFAULT 'Unverified' CHECK (status IN ('Verified', 'Unverified')),
+    role VARCHAR(50) NOT NULL DEFAULT 'Grounds Staff'
+        CHECK (role IN ('Administrator', 'Office Staff', 'Grounds Staff')),
+    status VARCHAR(50) NOT NULL DEFAULT 'Unverified'
+        CHECK (status IN ('Verified', 'Unverified')),
     email VARCHAR(255) NOT NULL,
     phone_number VARCHAR(20) NOT NULL,
     password_hash VARCHAR(255) NOT NULL,
@@ -19,21 +36,30 @@ CREATE TABLE IF NOT EXISTS users (
     created_by INT NULL REFERENCES users(user_id) ON DELETE SET NULL,
     updated_by INT NULL REFERENCES users(user_id) ON DELETE SET NULL
 );
-
--- PostgreSQL Partial Indexes (replaces shadow columns)
 CREATE UNIQUE INDEX IF NOT EXISTS uk_active_username ON users (username) WHERE deleted_at IS NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS uk_active_email ON users (email) WHERE deleted_at IS NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS uk_active_phone ON users (phone_number) WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uk_active_email    ON users (email)    WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uk_active_phone    ON users (phone_number) WHERE deleted_at IS NULL;
 
+DROP TRIGGER IF EXISTS trg_users_updated_at ON users;
+CREATE TRIGGER trg_users_updated_at
+    BEFORE UPDATE ON users
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+
+-- =====================================================================
 -- BLOCKS
+-- =====================================================================
 CREATE TABLE IF NOT EXISTS blocks (
     block_id SERIAL PRIMARY KEY,
     block_name VARCHAR(100) NOT NULL,
-    block_type VARCHAR(50) NOT NULL CHECK (block_type IN ('Niche', 'Bone Chamber', 'Lawn/Grounds', 'Unmapped Area', 'Private', 'Mausoleum', 'Mass Grave', 'Cluster', 'Block')),
+    block_type VARCHAR(50) NOT NULL
+        CHECK (block_type IN ('Niche', 'Bone Chamber', 'Lawn/Grounds',
+                              'Unmapped Area', 'Private', 'Mausoleum',
+                              'Mass Grave', 'Cluster', 'Block')),
     image_link TEXT,
-    coordinates JSON,
-    rows INT NOT NULL DEFAULT 0,
-    cols INT NOT NULL DEFAULT 0,
+    coordinates JSONB,
+    "rows" INT NOT NULL DEFAULT 0,
+    "cols" INT NOT NULL DEFAULT 0,
     rotation DECIMAL(10,6) DEFAULT 0.000000,
     remarks TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -44,15 +70,23 @@ CREATE TABLE IF NOT EXISTS blocks (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uk_active_block_name ON blocks (block_name) WHERE deleted_at IS NULL;
 
+DROP TRIGGER IF EXISTS trg_blocks_updated_at ON blocks;
+CREATE TRIGGER trg_blocks_updated_at
+    BEFORE UPDATE ON blocks
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
+
+-- =====================================================================
 -- GRAVES
+-- =====================================================================
 CREATE TABLE IF NOT EXISTS graves (
     grave_id SERIAL PRIMARY KEY,
     block_id INT NOT NULL REFERENCES blocks(block_id) ON DELETE RESTRICT,
     grave_code VARCHAR(50) NOT NULL,
     row_num INT,
     col_num INT,
-    status VARCHAR(20) DEFAULT 'Vacant' CHECK (status IN ('Vacant', 'Occupied', 'Other')),
+    status VARCHAR(20) DEFAULT 'Vacant'
+        CHECK (status IN ('Vacant', 'Occupied', 'Other')),
     remarks TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -62,8 +96,15 @@ CREATE TABLE IF NOT EXISTS graves (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uk_active_grave_code ON graves (grave_code) WHERE deleted_at IS NULL;
 
+DROP TRIGGER IF EXISTS trg_graves_updated_at ON graves;
+CREATE TRIGGER trg_graves_updated_at
+    BEFORE UPDATE ON graves
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
+
+-- =====================================================================
 -- INTERMENTS
+-- =====================================================================
 CREATE TABLE IF NOT EXISTS interments (
     interment_id SERIAL PRIMARY KEY,
     control_number VARCHAR(100) NOT NULL,
@@ -72,14 +113,16 @@ CREATE TABLE IF NOT EXISTS interments (
     death_certificate VARCHAR(100),
     deceased_date_of_birth DATE,
     deceased_date_of_death DATE,
-    deceased_sex VARCHAR(20) DEFAULT 'Unknown' CHECK (deceased_sex IN ('Male', 'Female', 'Unknown')),
+    deceased_sex VARCHAR(20) DEFAULT 'Unknown'
+        CHECK (deceased_sex IN ('Male', 'Female', 'Unknown')),
     current_grave_id INT NULL REFERENCES graves(grave_id) ON DELETE RESTRICT,
     contact_person_name VARCHAR(255),
     contact_person_phone_number VARCHAR(50),
     contact_person_email VARCHAR(150),
     contact_person_address_barangay TEXT,
     contact_person_address TEXT,
-    assistance_type VARCHAR(100) NOT NULL DEFAULT 'Burial' CHECK (assistance_type IN ('Burial', 'Transfer the remains of the late', 'Other')),
+    assistance_type VARCHAR(100) NOT NULL DEFAULT 'Burial'
+        CHECK (assistance_type IN ('Burial', 'Transfer the remains of the late', 'Other')),
     burial_permit_number VARCHAR(100),
     burial_permit_date DATE,
     transfer_permit_number VARCHAR(100),
@@ -91,7 +134,8 @@ CREATE TABLE IF NOT EXISTS interments (
     date_exhumed DATE,
     burial_clearance_date DATE,
     lease_expiration_date DATE,
-    status VARCHAR(20) NOT NULL DEFAULT 'Pending' CHECK (status IN ('Pending', 'Active', 'Inactive')),
+    status VARCHAR(20) NOT NULL DEFAULT 'Pending'
+        CHECK (status IN ('Pending', 'Active', 'Inactive')),
     remarks TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -100,61 +144,91 @@ CREATE TABLE IF NOT EXISTS interments (
     updated_by INT NULL REFERENCES users(user_id) ON DELETE SET NULL,
     CONSTRAINT chk_status_grave CHECK (status = 'Active' OR current_grave_id IS NULL)
 );
-CREATE UNIQUE INDEX IF NOT EXISTS uk_active_control_number ON interments (control_number) WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uk_active_control_number
+    ON interments (control_number) WHERE deleted_at IS NULL;
+
+DROP TRIGGER IF EXISTS trg_interments_updated_at ON interments;
+CREATE TRIGGER trg_interments_updated_at
+    BEFORE UPDATE ON interments
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 
+-- =====================================================================
 -- RESERVATIONS
+-- =====================================================================
 CREATE TABLE IF NOT EXISTS reservations (
     reservation_id SERIAL PRIMARY KEY,
     pending_interment_id INT NOT NULL REFERENCES interments(interment_id) ON DELETE RESTRICT,
     target_grave_id INT NOT NULL REFERENCES graves(grave_id) ON DELETE RESTRICT,
     old_interment_id INT NULL REFERENCES interments(interment_id) ON DELETE RESTRICT,
     old_new_grave_id INT NULL REFERENCES graves(grave_id) ON DELETE RESTRICT,
-    old_new_status VARCHAR(20) NULL CHECK (old_new_status IN ('Active','Inactive')),
-    old_new_assistance_type VARCHAR(100) NULL CHECK (old_new_assistance_type IN ('Burial','Transfer the remains of the late','Other')),
+    old_new_status VARCHAR(20) NULL
+        CHECK (old_new_status IN ('Active','Inactive')),
+    old_new_assistance_type VARCHAR(100) NULL
+        CHECK (old_new_assistance_type IN ('Burial','Transfer the remains of the late','Other')),
     old_new_remarks TEXT NULL,
     exhumation_permit_number VARCHAR(100) NULL,
     transfer_permit_number VARCHAR(100) NULL,
     reservation_notes TEXT NULL,
-    reservation_state VARCHAR(20) NOT NULL DEFAULT 'Active' CHECK (reservation_state IN ('Active','Executed','Cancelled')),
+    reservation_state VARCHAR(20) NOT NULL DEFAULT 'Active'
+        CHECK (reservation_state IN ('Active','Executed','Cancelled')),
     actioned_at TIMESTAMP NULL,
     actioned_by INT NULL REFERENCES users(user_id) ON DELETE SET NULL,
-    old_edited_fields JSON NULL,
+    old_edited_fields JSONB NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     created_by INT NULL REFERENCES users(user_id) ON DELETE SET NULL,
     updated_by INT NULL REFERENCES users(user_id) ON DELETE SET NULL,
     CONSTRAINT chk_old_pairing CHECK (
-        (old_interment_id IS NULL AND old_new_grave_id IS NULL AND old_new_status IS NULL AND old_new_assistance_type IS NULL) OR
+        (old_interment_id IS NULL AND old_new_grave_id IS NULL
+            AND old_new_status IS NULL AND old_new_assistance_type IS NULL)
+        OR
         (old_interment_id IS NOT NULL AND old_new_status IS NOT NULL)
     ),
-    CONSTRAINT chk_inactive_has_no_grave CHECK (NOT (old_new_status = 'Inactive' AND old_new_grave_id IS NOT NULL)),
-    CONSTRAINT chk_old_new_grave_not_target CHECK (old_new_grave_id IS NULL OR old_new_grave_id <> target_grave_id)
+    CONSTRAINT chk_inactive_has_no_grave CHECK (
+        NOT (old_new_status = 'Inactive' AND old_new_grave_id IS NOT NULL)
+    ),
+    CONSTRAINT chk_old_new_grave_not_target CHECK (
+        old_new_grave_id IS NULL OR old_new_grave_id <> target_grave_id
+    )
 );
-CREATE UNIQUE INDEX IF NOT EXISTS uk_active_pending_interment ON reservations(pending_interment_id) WHERE reservation_state = 'Active';
-CREATE UNIQUE INDEX IF NOT EXISTS uk_active_target_grave ON reservations(target_grave_id) WHERE reservation_state = 'Active';
-CREATE UNIQUE INDEX IF NOT EXISTS uk_active_old_interment ON reservations(old_interment_id) WHERE reservation_state = 'Active';
+CREATE UNIQUE INDEX IF NOT EXISTS uk_active_pending_interment
+    ON reservations (pending_interment_id) WHERE reservation_state = 'Active';
+CREATE UNIQUE INDEX IF NOT EXISTS uk_active_target_grave
+    ON reservations (target_grave_id)      WHERE reservation_state = 'Active';
+CREATE UNIQUE INDEX IF NOT EXISTS uk_active_old_interment
+    ON reservations (old_interment_id)     WHERE reservation_state = 'Active';
+
+DROP TRIGGER IF EXISTS trg_reservations_updated_at ON reservations;
+CREATE TRIGGER trg_reservations_updated_at
+    BEFORE UPDATE ON reservations
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 
--- PLACEMENT HISTORY
+-- =====================================================================
+-- PLACEMENT HISTORY  (append-only: no updated_at)
+-- =====================================================================
 CREATE TABLE IF NOT EXISTS placement_history (
     history_id SERIAL PRIMARY KEY,
     interment_id INT NOT NULL REFERENCES interments(interment_id) ON DELETE RESTRICT,
-    event_type VARCHAR(20) NOT NULL CHECK (event_type IN ('Initial','Move','Removal')),
+    event_type VARCHAR(20) NOT NULL
+        CHECK (event_type IN ('Initial','Move','Removal')),
     from_grave_id INT NULL REFERENCES graves(grave_id) ON DELETE RESTRICT,
-    to_grave_id INT NULL REFERENCES graves(grave_id) ON DELETE RESTRICT,
+    to_grave_id   INT NULL REFERENCES graves(grave_id) ON DELETE RESTRICT,
     event_date TIMESTAMP NOT NULL,
     reason TEXT NULL,
     related_interment_id INT NULL REFERENCES interments(interment_id) ON DELETE SET NULL,
     reservation_id INT NULL REFERENCES reservations(reservation_id) ON DELETE SET NULL,
-    snapshot_before JSON NULL,
-    snapshot_after JSON NULL,
+    snapshot_before JSONB NULL,
+    snapshot_after  JSONB NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     created_by INT NULL REFERENCES users(user_id) ON DELETE SET NULL
 );
 
 
+-- =====================================================================
 -- SETTINGS
+-- =====================================================================
 CREATE TABLE IF NOT EXISTS settings (
     setting_id SERIAL PRIMARY KEY,
     setting_key VARCHAR(50) NOT NULL,
@@ -166,10 +240,18 @@ CREATE TABLE IF NOT EXISTS settings (
     created_by INT NULL REFERENCES users(user_id) ON DELETE SET NULL,
     updated_by INT NULL REFERENCES users(user_id) ON DELETE SET NULL
 );
-CREATE UNIQUE INDEX IF NOT EXISTS uk_active_setting_key ON settings (setting_key) WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uk_active_setting_key
+    ON settings (setting_key) WHERE deleted_at IS NULL;
+
+DROP TRIGGER IF EXISTS trg_settings_updated_at ON settings;
+CREATE TRIGGER trg_settings_updated_at
+    BEFORE UPDATE ON settings
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 
+-- =====================================================================
 -- PAYMENTS
+-- =====================================================================
 CREATE TABLE IF NOT EXISTS payments (
     payment_id SERIAL PRIMARY KEY,
     reference_number VARCHAR(100) NOT NULL,
@@ -192,20 +274,180 @@ CREATE TABLE IF NOT EXISTS payments (
     created_by INT NULL REFERENCES users(user_id) ON DELETE SET NULL,
     updated_by INT NULL REFERENCES users(user_id) ON DELETE SET NULL
 );
-CREATE UNIQUE INDEX IF NOT EXISTS uk_active_reference_number ON payments (reference_number) WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uk_active_reference_number
+    ON payments (reference_number) WHERE deleted_at IS NULL;
 
--- GENERAL INDEXES (Foreign Keys & Statuses)
-CREATE INDEX IF NOT EXISTS idx_users_session_token ON users(session_token);
-CREATE INDEX IF NOT EXISTS idx_graves_block_id ON graves(block_id);
-CREATE INDEX IF NOT EXISTS idx_graves_status ON graves(status);
+DROP TRIGGER IF EXISTS trg_payments_updated_at ON payments;
+CREATE TRIGGER trg_payments_updated_at
+    BEFORE UPDATE ON payments
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+
+-- =====================================================================
+-- SMS_NOTIFICATIONS  (append-only log; no deleted_at)
+-- =====================================================================
+CREATE TABLE IF NOT EXISTS sms_notifications (
+    notification_id SERIAL PRIMARY KEY,
+    interment_id INT NOT NULL REFERENCES interments(interment_id) ON DELETE RESTRICT,
+    notification_type VARCHAR(30) NOT NULL DEFAULT 'Lease Expiring'
+        CHECK (notification_type IN ('Lease Expiring','Burial Confirmation',
+                                     'Payment Reminder','Other')),
+    lease_expiration_date_at_send DATE NULL,
+    days_before_expiry INT NULL,
+    recipient_name VARCHAR(255) NULL,
+    recipient_phone_number VARCHAR(50) NOT NULL,
+    message_body TEXT NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'Pending'
+        CHECK (status IN ('Pending','Sent','Failed','Skipped')),
+    sent_at TIMESTAMP NULL,
+    provider VARCHAR(50) NULL DEFAULT 'TextBee',
+    provider_message_id VARCHAR(255) NULL,
+    error_message TEXT NULL,
+    attempt_count INT NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_by INT NULL REFERENCES users(user_id) ON DELETE SET NULL,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Dedup only among 'Sent' rows. COALESCE turns NULL into a sentinel so the
+-- index also prevents duplicate SUCCESSFUL sends for manual / lease-less
+-- reminders (matches the old MySQL active_sent_key behaviour).
+CREATE UNIQUE INDEX IF NOT EXISTS uk_active_sent_key ON sms_notifications (
+    interment_id,
+    notification_type,
+    COALESCE(lease_expiration_date_at_send, DATE '0001-01-01'),
+    COALESCE(days_before_expiry, -1)
+) WHERE status = 'Sent';
+
+DROP TRIGGER IF EXISTS trg_sms_notifications_updated_at ON sms_notifications;
+CREATE TRIGGER trg_sms_notifications_updated_at
+    BEFORE UPDATE ON sms_notifications
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+
+-- =====================================================================
+-- INDEXES
+-- =====================================================================
+
+-- Users
+CREATE INDEX IF NOT EXISTS idx_users_deleted_at     ON users(deleted_at);
+CREATE INDEX IF NOT EXISTS idx_users_session_token  ON users(session_token);
+
+-- Blocks
+CREATE INDEX IF NOT EXISTS idx_blocks_deleted_at    ON blocks(deleted_at);
+
+-- Graves
+CREATE INDEX IF NOT EXISTS idx_graves_block_id      ON graves(block_id);
+CREATE INDEX IF NOT EXISTS idx_graves_status        ON graves(status);
+CREATE INDEX IF NOT EXISTS idx_graves_block_status  ON graves(block_id, status);
+CREATE INDEX IF NOT EXISTS idx_graves_deleted_at    ON graves(deleted_at);
+
+-- Interments
 CREATE INDEX IF NOT EXISTS idx_interments_current_grave_id ON interments(current_grave_id);
-CREATE INDEX IF NOT EXISTS idx_interments_status ON interments(status);
-CREATE INDEX IF NOT EXISTS idx_reservations_state ON reservations(reservation_state);
-CREATE INDEX IF NOT EXISTS idx_history_interment_id ON placement_history(interment_id);
+CREATE INDEX IF NOT EXISTS idx_interments_status           ON interments(status);
+CREATE INDEX IF NOT EXISTS idx_interments_deceased_name    ON interments(deceased_name);
+CREATE INDEX IF NOT EXISTS idx_interments_lease_expiration ON interments(lease_expiration_date);
+CREATE INDEX IF NOT EXISTS idx_interments_status_grave     ON interments(status, current_grave_id);
+CREATE INDEX IF NOT EXISTS idx_interments_date_buried      ON interments(date_buried);
+CREATE INDEX IF NOT EXISTS idx_interments_deleted_at       ON interments(deleted_at);
+
+-- Reservations
+CREATE INDEX IF NOT EXISTS idx_reservations_state             ON reservations(reservation_state);
+CREATE INDEX IF NOT EXISTS idx_reservations_target_grave      ON reservations(target_grave_id);
+CREATE INDEX IF NOT EXISTS idx_reservations_old_interment     ON reservations(old_interment_id);
+CREATE INDEX IF NOT EXISTS idx_reservations_pending_interment ON reservations(pending_interment_id);
+CREATE INDEX IF NOT EXISTS idx_reservations_state_target      ON reservations(reservation_state, target_grave_id);
+CREATE INDEX IF NOT EXISTS idx_reservations_created_at        ON reservations(created_at);
+
+-- Placement history
+CREATE INDEX IF NOT EXISTS idx_history_interment_id      ON placement_history(interment_id);
+CREATE INDEX IF NOT EXISTS idx_history_event_date        ON placement_history(event_date);
+CREATE INDEX IF NOT EXISTS idx_history_interment_date    ON placement_history(interment_id, event_date);
+CREATE INDEX IF NOT EXISTS idx_history_from_grave        ON placement_history(from_grave_id);
+CREATE INDEX IF NOT EXISTS idx_history_to_grave          ON placement_history(to_grave_id);
+CREATE INDEX IF NOT EXISTS idx_history_reservation       ON placement_history(reservation_id);
+CREATE INDEX IF NOT EXISTS idx_history_related_interment ON placement_history(related_interment_id);
+
+-- Settings
+CREATE INDEX IF NOT EXISTS idx_settings_deleted_at ON settings(deleted_at);
+
+-- Payments
+CREATE INDEX IF NOT EXISTS idx_payments_deleted_at ON payments(deleted_at);
+
+-- SMS
+CREATE INDEX IF NOT EXISTS idx_sms_notifications_interment  ON sms_notifications(interment_id);
+CREATE INDEX IF NOT EXISTS idx_sms_notifications_status     ON sms_notifications(status);
+CREATE INDEX IF NOT EXISTS idx_sms_notifications_type_sent  ON sms_notifications(notification_type, sent_at);
+CREATE INDEX IF NOT EXISTS idx_sms_notifications_lease_date ON sms_notifications(lease_expiration_date_at_send);
+CREATE INDEX IF NOT EXISTS idx_sms_notifications_stage      ON sms_notifications(days_before_expiry);
+
+
+-- =====================================================================
+-- TABLE COMMENTS
+-- =====================================================================
+COMMENT ON TABLE users             IS 'System users with role-based access';
+COMMENT ON TABLE blocks            IS 'Cemetery sections/areas';
+COMMENT ON TABLE graves            IS 'Individual burial slots inside a block';
+COMMENT ON TABLE interments        IS 'PRESENT. One row per deceased. Current state.';
+COMMENT ON TABLE reservations      IS 'FUTURE. Proposal to move O and place N. Frozen after creation.';
+COMMENT ON TABLE placement_history IS 'PAST. Append-only placement history. No edits logged.';
+COMMENT ON TABLE settings          IS 'System configuration key-value store';
+COMMENT ON TABLE payments          IS 'Payment records with dual-approval workflow';
+COMMENT ON TABLE sms_notifications IS 'PAST. Append-only log of every SMS attempt (lease reminders, etc).';
+
+
+-- =====================================================================
+-- SEED DATA  (idempotent — safe to re-run)
+-- =====================================================================
+
+-- Default admin. Password below is the existing hash from the original
+-- schema; leave as-is or change it via the app.
+INSERT INTO users
+    (user_id, username, role, status, email, phone_number,
+     password_hash, name, session_token,
+     created_at, updated_at, deleted_at, created_by, updated_by)
+VALUES
+    (1, 'admin', 'Administrator', 'Verified', 'admin@gmail.com', '+639293456789',
+     '$2y$12$YtdLBOCGz5.WcnxtHGPBx.eg4yRaijZUBMOYuw9GVAxkp670BXW0y',
+     'Administrator', NULL,
+     '2026-10-11 01:37:40', '2026-10-11 01:37:57', NULL, NULL, NULL)
+ON CONFLICT DO NOTHING;
+
+SELECT setval('users_user_id_seq', (SELECT COALESCE(MAX(user_id), 1) FROM users));
+
+-- Default settings
+INSERT INTO settings
+    (setting_id, setting_key, setting_value, description,
+     created_at, updated_at, deleted_at, created_by, updated_by)
+VALUES
+(1, 'logo_1', 'logo_1.png', 'Header Logo 1', '2026-10-11 19:05:43', '2026-10-11 19:05:50', NULL, 1, 1),
+(2, 'logo_2', 'logo_2.png', 'Header Logo 2', '2026-10-11 19:05:43', '2026-10-11 19:05:50', NULL, 1, 1),
+(3, 'cemetery_logo', 'cemetery_logo.png', 'Cemetery Logo', '2026-10-11 19:05:43', '2026-10-11 19:05:50', NULL, 1, 1),
+(4, 'cemetery_mark', 'cemetery_mark.png', 'Cemetery Mark', '2026-10-11 19:05:43', '2026-10-11 19:05:50', NULL, 1, 1),
+(5, 'cemetery_background', 'cemetery_background.png', 'Cemetery Background', '2026-10-11 19:05:43', '2026-10-11 19:05:50', NULL, 1, 1),
+(6, 'qr_code', 'qr_code.png', 'Payment QR Code', '2026-10-11 19:05:43', '2026-10-11 19:05:50', NULL, 1, 1),
+(7, 'dept_name', 'Department of General Services', 'Main Department Name', '2026-10-11 19:05:43', '2026-10-11 19:05:50', NULL, 1, 1),
+(8, 'cemetery_name', 'Mandaue City Public Cemetery', 'Cemetery Name', '2026-10-11 19:05:43', '2026-10-11 19:05:50', NULL, 1, 1),
+(9, 'cemetery_address', 'Barangay Guizo, 710 del Pilar Street, Mandaue, 6014 Cebu', 'Cemetery Physical Address', '2026-10-11 19:05:43', '2026-10-11 19:05:50', NULL, 1, 1),
+(10, 'office_address', '8WFV+PC8 Barangay Centro, Mandaue, Cebu', 'Administrative Office Address', '2026-10-11 19:05:43', '2026-10-11 19:05:50', NULL, 1, 1),
+(11, 'cemetery_google_maps', 'https://www.google.com/maps/embed?pb=!1m18!1m12!1m3!1d693.8860555934123!2d123.94400457004447!3d10.32488936201375!2m3!1f0!2f0!3f0!3m2!1i1024!2i768!4f13.1!3m3!1m2!1s0x33a999006ffb7753%3A0x1e52e02b25fd79be!2sDepartment%20of%20General%20Services!5e0!3m2!1sen!2sph!4v1786613815863!5m2!1sen!2sph" allowfullscreen="" loading="lazy" referrerpolicy="strict-origin-when-cross-origin', 'Google Maps Embed URL', '2026-10-11 19:05:43', '2026-10-11 19:05:50', NULL, 1, 1),
+(12, 'contact_phone', '+63 912 3456 789', 'Contact Hotline / Phone', '2026-10-11 19:05:43', '2026-10-11 19:05:50', NULL, 1, 1),
+(13, 'contact_email', 'memoria@gmail.com', 'Official Email Address', '2026-10-11 19:05:43', '2026-10-11 19:05:50', NULL, 1, 1),
+(14, 'payment_channels_list', '["Maya", "GoTyme", "Maribank", "GCash"]', 'Payment Channels', '2026-10-11 19:05:43', '2026-10-11 19:05:50', NULL, 1, 1),
+(15, 'payment_purposes_list', '["Pasuga / Lighting", "Burial Fee"]', 'Purposes of Payment', '2026-10-11 19:05:43', '2026-10-11 19:05:50', NULL, 1, 1),
+(31, 'main_color', '#0f172a', 'UI Primary Color', '2026-10-11 19:09:11', '2026-10-11 19:09:20', NULL, 1, 1),
+(32, 'people_name_1', 'Ms. Rosemarie U. Chavez', 'Report Signatory 1 Name', '2026-10-11 19:09:11', '2026-10-11 19:09:20', NULL, 1, 1),
+(33, 'people_title_1', 'OIC, Department of General Services', 'Report Signatory 1 Title', '2026-10-11 19:09:11', '2026-10-11 19:09:20', NULL, 1, 1),
+(34, 'people_name_2', 'Ar. Maria Aileen A. Paragsa', 'Report Signatory 2 Name', '2026-10-11 19:09:11', '2026-10-11 19:09:20', NULL, 1, 1),
+(35, 'people_title_2', 'Admin Division Chief', 'Report Signatory 2 Title', '2026-10-11 19:09:11', '2026-10-11 19:09:20', NULL, 1, 1),
+(36, 'cemetery_map_images', 'cemetery_map_image.png', 'For the cemetery map backgound image', '2026-11-04 22:50:13', '2026-11-04 22:50:13', NULL, 1, 1),
+(37, 'barangay_options', '["Alang-alang", "Bakilid", "Banilad", "Basak", "Cabancalan", "Cambaro", "Canduman", "Casuntingan", "Casili", "Centro", "Cubacub", "Guizo", "Ibabao-Estancia", "Jagobiao", "Labogon", "Looc", "Maguikay", "Mantuyong", "Opao", "Pakna-an", "Pagsabungan", "Subangdaku", "Tabok", "Tingub", "Tipolo", "Umapad"]', 'Barangay Options', '2026-11-04 22:50:13', '2026-11-04 22:50:13', NULL, 1, 1),
+(38, 'auto_send_sms_expiring', '0', 'Enable SMS Automation alerts every 2 mins', '2026-11-19 01:13:00', '2026-11-19 01:13:05', NULL, 1, 1)
+ON CONFLICT DO NOTHING;
+
+SELECT setval('settings_setting_id_seq', (SELECT COALESCE(MAX(setting_id), 1) FROM settings));
 
 -- REALISTIC DUMMY DATA:
-INSERT INTO users (user_id, username, role, status, email, phone_number, password_hash, name, session_token, deleted_at, created_by, updated_by) VALUES (1, 'admin', 'Administrator', 'Verified', 'admin@gmail.com', '+639293456789', '$2y$12$YtdLBOCGz5.WcnxtHGPBx.eg4yRaijZUBMOYuw9GVAxkp670BXW0y', 'Administrator', '{"token":"1455fc0b6602c0e412eb39a21c6c0f61","ip":"127.0.0.1","user_agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36","time":"Nov 04, 2026 05:10 PM"}', NULL, NULL, NULL);
-
 INSERT INTO blocks (block_id, block_name, block_type, image_link, coordinates, rows, cols, rotation, remarks, deleted_at, created_by, updated_by) VALUES (1, 'Block A', 'Niche', 'https://lh3.googleusercontent.com/pw/AP1GczPm8PoMTq8qseByrs9OFdn1PQxXTjSVp2-4zdU_dPqfgbL_7MP2VHg7M9xO4oTsMxRpy5jAcK3Hs--jiOBX8-R44gjfW9s8BRhvWZDujo_Zl0hVw4CScO0tTzO3TDKZ4TWOiVxPEQD9pD5D8oIujUMj=w1380-h777-s-no-gm?authuser=0', '[{"x": 44, "y": 108}, {"x": 141, "y": 108}, {"x": 141, "y": 383}, {"x": 44, "y": 383}]', 26, 26, '0.000000', NULL, NULL, 1, 1);
 INSERT INTO blocks (block_id, block_name, block_type, image_link, coordinates, rows, cols, rotation, remarks, deleted_at, created_by, updated_by) VALUES (2, 'Block B', 'Niche', 'https://lh3.googleusercontent.com/pw/AP1GczNCs0UwooAs0ZcT4_LeawrsCIUoEI_ghJZWOdPHHNUVORPYh-2_8yk7iCuIBHigSImk2k8ZoMWvP_hS5WFZ0XqYZm9bM0KW7FPNvS3g2V8oUHTYhprFJ0xM4xZFOWNsfROTEHMeBbNjcW23BMCFRjbJ=w1380-h777-s-no-gm?authuser=0', '[{"x": 325, "y": 109}, {"x": 418, "y": 109}, {"x": 418, "y": 396}, {"x": 325, "y": 396}]', 26, 26, '0.022207', NULL, NULL, 1, 1);
 INSERT INTO blocks (block_id, block_name, block_type, image_link, coordinates, rows, cols, rotation, remarks, deleted_at, created_by, updated_by) VALUES (3, 'Block C', 'Niche', 'https://lh3.googleusercontent.com/pw/AP1GczO05pIrAMC-hAscxFlq1B_CubjwhGtLA9BUmmdOhqKpP7Y5_1Gr52I8i5yOLX2_EQA8HIA2t6v9Eq1YFWJhKDb05kZZiVmHCskVQJ1-Hb26RZISLdLmADsB6sh6Mhm3224PaTTcADVVzVFvwG47KCCF=w1380-h777-s-no-gm?authuser=0', '[{"x": 428, "y": 105}, {"x": 518, "y": 105}, {"x": 518, "y": 396}, {"x": 428, "y": 396}]', 26, 26, '0.000000', NULL, NULL, 1, 1);
@@ -4267,32 +4509,6 @@ INSERT INTO interments (interment_id, control_number, deceased_name, last_known_
 INSERT INTO interments (interment_id, control_number, deceased_name, last_known_address, death_certificate, deceased_date_of_birth, deceased_date_of_death, deceased_sex, current_grave_id, contact_person_name, contact_person_phone_number, contact_person_email, contact_person_address_barangay, contact_person_address, assistance_type, burial_permit_number, burial_permit_date, transfer_permit_number, transfer_permit_issued_by, transfer_permit_date, exhumation_permit_number, exhumation_permit_date, date_buried, date_exhumed, burial_clearance_date, lease_expiration_date, status, remarks, deleted_at, created_by, updated_by) VALUES (2026, 'CN-2021-2026', 'Aurora Dela Cruz', 'N. Bacalso Ave., Bakilid, Mandaue City, Cebu', 'DC-2021-02026', '1961-01-11', '2021-10-31', 'Female', 61, 'James Dela Cruz', '+639679251374', 'james.delacruz22@gmail.com', 'Bakilid', 'N. Bacalso Ave., Bakilid, Mandaue City, Cebu', 'Burial', 'BP-2021-02026', '2021-11-02', NULL, NULL, NULL, NULL, NULL, '2021-11-03', NULL, '2021-11-05', '2027-11-10', 'Active', NULL, NULL, NULL, 1);
 INSERT INTO interments (interment_id, control_number, deceased_name, last_known_address, death_certificate, deceased_date_of_birth, deceased_date_of_death, deceased_sex, current_grave_id, contact_person_name, contact_person_phone_number, contact_person_email, contact_person_address_barangay, contact_person_address, assistance_type, burial_permit_number, burial_permit_date, transfer_permit_number, transfer_permit_issued_by, transfer_permit_date, exhumation_permit_number, exhumation_permit_date, date_buried, date_exhumed, burial_clearance_date, lease_expiration_date, status, remarks, deleted_at, created_by, updated_by) VALUES (2027, 'CN-2023-2027', 'Helen Abella', 'P. Suico St., Cabancalan, Mandaue City, Cebu', 'DC-2023-02027', '1984-11-09', '2023-08-03', 'Female', 948, 'Elisa Abella', '+639003082063', 'elisa.abella49@yahoo.com', 'Cabancalan', 'P. Suico St., Cabancalan, Mandaue City, Cebu', 'Burial', 'BP-2023-02027', '2023-08-04', NULL, NULL, NULL, NULL, NULL, '2023-08-07', NULL, '2023-08-07', '2028-08-07', 'Active', NULL, NULL, NULL, NULL);
 INSERT INTO interments (interment_id, control_number, deceased_name, last_known_address, death_certificate, deceased_date_of_birth, deceased_date_of_death, deceased_sex, current_grave_id, contact_person_name, contact_person_phone_number, contact_person_email, contact_person_address_barangay, contact_person_address, assistance_type, burial_permit_number, burial_permit_date, transfer_permit_number, transfer_permit_issued_by, transfer_permit_date, exhumation_permit_number, exhumation_permit_date, date_buried, date_exhumed, burial_clearance_date, lease_expiration_date, status, remarks, deleted_at, created_by, updated_by) VALUES (2028, 'CN-2021-2028', 'Nicole Marquez', 'M.L. Quezon St., Subangdaku, Mandaue City, Cebu', 'DC-2021-02028', '1977-04-04', '2021-11-15', 'Female', 2026, 'Robert Marquez', '+639484289421', 'robert.marquez25@gmail.com', 'Subangdaku', 'M.L. Quezon St., Subangdaku, Mandaue City, Cebu', 'Burial', 'BP-2021-02028', '2021-11-16', NULL, NULL, NULL, NULL, NULL, '2021-11-21', NULL, '2021-11-22', '2027-11-03', 'Active', NULL, NULL, 1, NULL);
-
-
-INSERT INTO payments (payment_id, reference_number, payment_channel, amount, deceased_name, payers_phone_number, payers_email, payers_name, purpose, image_link, confirmed_office_staff, confirmed_ground_staff, remarks_payer, remarks_office, remarks_grounds, deleted_at, created_by, updated_by) VALUES (1, '0046876781312', 'GCash', '70.00', 'Jean Aika R. Canoy', '+639154570385', 'jeanaikacanoy224@gmail.com', 'John Anthony O. Tabigne', 'Pasuga / Lighting', 'https://lh3.googleusercontent.com/pw/AP1GczNF6uNbzhA1JChzgLOwuBHO_TNKihx3ollL2QV6o6v2L1LnMV2E2fXNbASlQ_6jgHrsNrbSWLkPtXE3VtryS8StLa2_h5o5Sk33khOu5HK8winPmVKK0GCaZOI4244kEAZ2Vt_8Dp4X-Trw-e37tKUV=w395-h878-s-no-gm?authuser=0', NULL, NULL, 'For pasuga', NULL, NULL, NULL, NULL, NULL);
-
-
-INSERT INTO settings (setting_id, setting_key, setting_value, description, deleted_at, created_by, updated_by) VALUES (1, 'logo_1', 'logo_1.png', 'Header Logo 1', NULL, 1, 1);
-INSERT INTO settings (setting_id, setting_key, setting_value, description, deleted_at, created_by, updated_by) VALUES (2, 'logo_2', 'logo_2.png', 'Header Logo 2', NULL, 1, 1);
-INSERT INTO settings (setting_id, setting_key, setting_value, description, deleted_at, created_by, updated_by) VALUES (3, 'cemetery_logo', 'cemetery_logo.png', 'Cemetery Logo', NULL, 1, 1);
-INSERT INTO settings (setting_id, setting_key, setting_value, description, deleted_at, created_by, updated_by) VALUES (4, 'cemetery_mark', 'cemetery_mark.png', 'Cemetery Mark', NULL, 1, 1);
-INSERT INTO settings (setting_id, setting_key, setting_value, description, deleted_at, created_by, updated_by) VALUES (5, 'cemetery_background', 'cemetery_background.png', 'Cemetery Background', NULL, 1, 1);
-INSERT INTO settings (setting_id, setting_key, setting_value, description, deleted_at, created_by, updated_by) VALUES (6, 'qr_code', 'qr_code.png', 'Payment QR Code', NULL, 1, 1);
-INSERT INTO settings (setting_id, setting_key, setting_value, description, deleted_at, created_by, updated_by) VALUES (7, 'dept_name', 'Department of General Services', 'Main Department Name', NULL, 1, 1);
-INSERT INTO settings (setting_id, setting_key, setting_value, description, deleted_at, created_by, updated_by) VALUES (8, 'cemetery_name', 'Mandaue City Public Cemetery', 'Cemetery Name', NULL, 1, 1);
-INSERT INTO settings (setting_id, setting_key, setting_value, description, deleted_at, created_by, updated_by) VALUES (9, 'cemetery_address', 'Barangay Guizo, 710 del Pilar Street, Mandaue, 6014 Cebu', 'Cemetery Physical Address', NULL, 1, 1);
-INSERT INTO settings (setting_id, setting_key, setting_value, description, deleted_at, created_by, updated_by) VALUES (10, 'office_address', '8WFV+PC8 Barangay Centro, Mandaue, Cebu', 'Administrative Office Address', NULL, 1, 1);
-INSERT INTO settings (setting_id, setting_key, setting_value, description, deleted_at, created_by, updated_by) VALUES (11, 'cemetery_google_maps', 'https://www.google.com/maps/embed?pb=!1m18!1m12!1m3!1d693.8860555934123!2d123.94400457004447!3d10.32488936201375!2m3!1f0!2f0!3f0!3m2!1i1024!2i768!4f13.1!3m3!1m2!1s0x33a999006ffb7753%3A0x1e52e02b25fd79be!2sDepartment%20of%20General%20Services!5e0!3m2!1sen!2sph!4v1786613815863!5m2!1sen!2sph" allowfullscreen="" loading="lazy" referrerpolicy="strict-origin-when-cross-origin', 'Google Maps Embed URL', NULL, 1, 1);
-INSERT INTO settings (setting_id, setting_key, setting_value, description, deleted_at, created_by, updated_by) VALUES (12, 'contact_phone', '+63 912 3456 789', 'Contact Hotline / Phone', NULL, 1, 1);
-INSERT INTO settings (setting_id, setting_key, setting_value, description, deleted_at, created_by, updated_by) VALUES (13, 'contact_email', 'memoria@gmail.com', 'Official Email Address', NULL, 1, 1);
-INSERT INTO settings (setting_id, setting_key, setting_value, description, deleted_at, created_by, updated_by) VALUES (14, 'payment_channels_list', '["Maya", "GoTyme", "Maribank", "GCash"]', 'Payment Channels', NULL, 1, 1);
-INSERT INTO settings (setting_id, setting_key, setting_value, description, deleted_at, created_by, updated_by) VALUES (15, 'payment_purposes_list', '["Pasuga / Lighting", "Burial Fee"]', 'Purposes of Payment', NULL, 1, 1);
-INSERT INTO settings (setting_id, setting_key, setting_value, description, deleted_at, created_by, updated_by) VALUES (31, 'main_color', '#0f172a', 'UI Primary Color', NULL, 1, 1);
-INSERT INTO settings (setting_id, setting_key, setting_value, description, deleted_at, created_by, updated_by) VALUES (32, 'people_name_1', 'Ms. Rosemarie U. Chavez', 'Report Signatory 1 Name', NULL, 1, 1);
-INSERT INTO settings (setting_id, setting_key, setting_value, description, deleted_at, created_by, updated_by) VALUES (33, 'people_title_1', 'OIC, Department of General Services', 'Report Signatory 1 Title', NULL, 1, 1);
-INSERT INTO settings (setting_id, setting_key, setting_value, description, deleted_at, created_by, updated_by) VALUES (34, 'people_name_2', 'Ar. Maria Aileen A. Paragsa', 'Report Signatory 2 Name', NULL, 1, 1);
-INSERT INTO settings (setting_id, setting_key, setting_value, description, deleted_at, created_by, updated_by) VALUES (35, 'people_title_2', 'Admin Division Chief', 'Report Signatory 2 Title', NULL, 1, 1);
-INSERT INTO settings (setting_id, setting_key, setting_value, description, deleted_at, created_by, updated_by) VALUES (36, 'cemetery_map_images', 'cemetery_map_image.png', 'For the cemetery map backgound image', NULL, 1, 1);
 
 SQL;
 
