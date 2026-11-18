@@ -1,15 +1,105 @@
 <?php
-// sms_alerts.php
+// sms_alerts.php (PostgreSQL Version)
 require_once 'config.php';
 require_once 'textbee.php';
 
+// Helper to keep the lease reminder message format consistent across generation, sync, and sending.
+function buildLeaseExpiringMessage(string $deceasedName, string $leaseExpirationDate): string
+{
+    return "Reminder: The lease for {$deceasedName} at the cemetery is due on {$leaseExpirationDate}. Please contact the office.";
+}
+
+// Synchronize all queued (Pending / Failed) notifications with the live interments table.
+// 1. Marks Pending/Failed rows as 'Skipped' if the interment was deactivated, soft-deleted,
+//    or had its lease_expiration_date changed/renewed.
+// 2. Updates recipient_name, recipient_phone_number, and message_body on remaining
+//    Pending/Failed rows (only when values differ) so edits in interments immediately reflect.
+// Sent rows are never modified so historical audit logs stay frozen.
+function syncQueuedSmsAlerts(PDO $pdo): array
+{
+    // 1. Auto-skip queued lease alerts whose interment is no longer active or whose lease date changed.
+    // PostgreSQL uses NOT EXISTS instead of MySQL's UPDATE ... LEFT JOIN.
+    $skipStmt = $pdo->prepare("
+        UPDATE sms_notifications s
+           SET status = 'Skipped',
+               updated_at = NOW(),
+               error_message = CASE
+                   WHEN s.error_message IS NULL OR s.error_message = ''
+                       THEN 'Lease renewed or interment status changed before send'
+                   ELSE CONCAT('Lease renewed or interment status changed before send | Original: ', s.error_message)
+               END
+         WHERE s.status IN ('Pending', 'Failed')
+           AND s.notification_type = 'Lease Expiring'
+           AND NOT EXISTS (
+               SELECT 1
+                 FROM interments i
+                WHERE i.interment_id = s.interment_id
+                  AND i.deleted_at IS NULL
+                  AND i.status = 'Active'
+                  AND i.lease_expiration_date IS NOT NULL
+                  AND i.lease_expiration_date = s.lease_expiration_date_at_send
+           )
+    ");
+    $skipStmt->execute();
+    $autoSkipped = $skipStmt->rowCount();
+
+    // 2. Sync latest contact name, phone number, and deceased name into remaining Pending/Failed rows.
+    // PostgreSQL uses UPDATE ... FROM and checks for actual differences to avoid unnecessary MVCC writes.
+    $syncStmt = $pdo->prepare("
+        UPDATE sms_notifications s
+           SET recipient_name = i.contact_person_name,
+               recipient_phone_number = COALESCE(TRIM(i.contact_person_phone_number), ''),
+               message_body = CASE
+                   WHEN s.notification_type = 'Lease Expiring' THEN
+                       CONCAT(
+                           'Reminder: The lease for ',
+                           i.deceased_name,
+                           ' at the cemetery is due on ',
+                           TO_CHAR(s.lease_expiration_date_at_send::date, 'YYYY-MM-DD'),
+                           '. Please contact the office.'
+                       )
+                   ELSE s.message_body
+               END,
+               updated_at = NOW()
+          FROM interments i
+         WHERE s.interment_id = i.interment_id
+           AND s.status IN ('Pending', 'Failed')
+           AND i.deleted_at IS NULL
+           AND i.status = 'Active'
+           AND (
+               COALESCE(s.recipient_name, '') <> COALESCE(i.contact_person_name, '')
+               OR COALESCE(s.recipient_phone_number, '') <> COALESCE(TRIM(i.contact_person_phone_number), '')
+               OR (
+                   s.notification_type = 'Lease Expiring'
+                   AND s.message_body <> CONCAT(
+                       'Reminder: The lease for ',
+                       i.deceased_name,
+                       ' at the cemetery is due on ',
+                       TO_CHAR(s.lease_expiration_date_at_send::date, 'YYYY-MM-DD'),
+                       '. Please contact the office.'
+                   )
+               )
+           )
+    ");
+    $syncStmt->execute();
+    $synced = $syncStmt->rowCount();
+
+    return [
+        'auto_skipped' => $autoSkipped,
+        'synced'       => $synced,
+    ];
+}
+
 // Scan active interments and insert Pending rows for leases that
-// match a reminder stage. Idempotent — safe to run as often as you
+// match a reminder stage. Idempotent — safe to run as often as you want;
 // the dedup check prevents duplicate rows for the same
-// (interment, stage, lease-date) combo
+// (interment, stage, lease-date) combo.
 function generateSmsAlerts(PDO $pdo): array
 {
     global $SMS_REMINDER_STAGES;
+
+    // First, sync existing Pending/Failed rows with any recent changes in interments
+    $syncStats = syncQueuedSmsAlerts($pdo);
 
     $inserted = 0;
     $skipped  = 0;
@@ -68,7 +158,11 @@ function generateSmsAlerts(PDO $pdo): array
                 continue;
             }
 
-            $message = "Reminder: The lease for {$lease['deceased_name']} at the cemetery is due on {$lease['lease_expiration_date']}. Please contact the office.";
+            $phone   = trim((string)($lease['contact_person_phone_number'] ?? ''));
+            $message = buildLeaseExpiringMessage(
+                (string)$lease['deceased_name'],
+                (string)$lease['lease_expiration_date']
+            );
 
             $pdo->prepare("
                 INSERT INTO sms_notifications
@@ -81,20 +175,32 @@ function generateSmsAlerts(PDO $pdo): array
                 $lease['lease_expiration_date'],
                 $stageDays,
                 $lease['contact_person_name'],
-                $lease['contact_person_phone_number'],
+                $phone,
                 $message,
             ]);
             $inserted++;
         }
     }
 
-    return ['inserted' => $inserted, 'skipped' => $skipped];
+    return [
+        'inserted'     => $inserted,
+        'skipped'      => $skipped,
+        'synced'       => $syncStats['synced'],
+        'auto_skipped' => $syncStats['auto_skipped'],
+    ];
 }
 
 // Drain the Pending/Failed queue, respecting the daily cap and the
 // per-run batch cap. Updates status + attempt_count on each row.
+//
+// Before sending, syncs queued rows and re-reads the live interment row so that
+// (a) renewed leases / deactivated interments are caught, and
+// (b) a corrected contact name, phone number, or deceased name replaces the snapshot.
 function processSmsAlerts(PDO $pdo): array
 {
+    // Sync queued rows right before processing so any last-second edits are applied
+    $syncStats = syncQueuedSmsAlerts($pdo);
+
     $dailyLimit = SMS_MAX_DAILY_SENDS;
     $batchLimit = SMS_MAX_BATCH_PER_RUN;
     $maxRetries = SMS_MAX_RETRY_ATTEMPTS;
@@ -109,12 +215,13 @@ function processSmsAlerts(PDO $pdo): array
     $remainingToday = max(0, $dailyLimit - $sentToday);
     if ($remainingToday === 0) {
         return [
-            'processed' => 0,
-            'sent' => 0,
-            'failed' => 0,
-            'skipped' => 0,
-            'reason' => 'Daily send cap reached',
-            'sent_today' => $sentToday,
+            'processed'            => 0,
+            'sent'                 => 0,
+            'failed'               => 0,
+            'skipped'              => 0,
+            'recipients_refreshed' => $syncStats['synced'],
+            'reason'               => 'Daily send cap reached',
+            'sent_today'           => $sentToday,
         ];
     }
 
@@ -122,8 +229,7 @@ function processSmsAlerts(PDO $pdo): array
 
     // Priority: closest to 0 (most urgent), then oldest.
     // PostgreSQL: DATEDIFF(a, b) → (a::date - CURRENT_DATE) integer days.
-    // CAST(... AS BIGINT) keeps the LIMIT operand type-safe regardless of
-    // PDO/php version quirks around LIMIT placeholders.
+    // CAST(... AS BIGINT) keeps the LIMIT operand type-safe.
     $stmt = $pdo->prepare("
         SELECT *
           FROM sms_notifications
@@ -138,29 +244,42 @@ function processSmsAlerts(PDO $pdo): array
     $stmt->execute();
     $candidates = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-    $stats = ['processed' => 0, 'sent' => 0, 'failed' => 0, 'skipped' => 0];
+    $stats = [
+        'processed'            => 0,
+        'sent'                 => 0,
+        'failed'               => 0,
+        'skipped'              => 0,
+        'recipients_refreshed' => $syncStats['synced'],
+    ];
 
     foreach ($candidates as $row) {
         $stats['processed']++;
 
-        // Safety: has the lease been renewed or the interment deactivated
-        // between generation and now?
+        // Fetch live interment data right before sending to guarantee fresh contact info
+        // and verify that the lease hasn't been renewed or deactivated.
         $checkStmt = $pdo->prepare("
-            SELECT 1 FROM interments
+            SELECT deceased_name,
+                   contact_person_name,
+                   contact_person_phone_number,
+                   lease_expiration_date
+              FROM interments
              WHERE interment_id = CAST(:iid AS BIGINT)
                AND lease_expiration_date = :led
                AND status = 'Active'
                AND deleted_at IS NULL
+             LIMIT 1
         ");
         $checkStmt->execute([
             ':iid' => $row['interment_id'],
             ':led' => $row['lease_expiration_date_at_send'],
         ]);
+        $liveInterment = $checkStmt->fetch(PDO::FETCH_ASSOC);
 
-        if (!$checkStmt->fetchColumn()) {
+        if (!$liveInterment) {
             $pdo->prepare("
                 UPDATE sms_notifications
                    SET status = 'Skipped',
+                       updated_at = NOW(),
                        error_message = 'Lease renewed or interment status changed before send'
                  WHERE notification_id = CAST(? AS BIGINT)
             ")->execute([$row['notification_id']]);
@@ -168,10 +287,41 @@ function processSmsAlerts(PDO $pdo): array
             continue;
         }
 
+        // Pull latest live values from the interment record
+        $liveRecipientName = $liveInterment['contact_person_name'];
+        $livePhone         = trim((string)($liveInterment['contact_person_phone_number'] ?? ''));
+        $liveMessage       = ($row['notification_type'] === 'Lease Expiring')
+            ? buildLeaseExpiringMessage(
+                (string)$liveInterment['deceased_name'],
+                (string)$liveInterment['lease_expiration_date']
+            )
+            : (string)$row['message_body'];
+
+        // Guard against missing/blank phone number before calling TextBee
+        if ($livePhone === '') {
+            $pdo->prepare("
+                UPDATE sms_notifications
+                   SET recipient_name = :rname,
+                       recipient_phone_number = '',
+                       message_body = :msg,
+                       status = 'Failed',
+                       attempt_count = attempt_count + 1,
+                       error_message = 'Missing contact phone number in interment record',
+                       updated_at = NOW()
+                 WHERE notification_id = CAST(:nid AS BIGINT)
+            ")->execute([
+                ':rname' => $liveRecipientName,
+                ':msg'   => $liveMessage,
+                ':nid'   => $row['notification_id'],
+            ]);
+            $stats['failed']++;
+            continue;
+        }
+
         // include_cemetery_name = TRUE → function appends the suffix
         $result = sendSmsViaTextBee(
-            $row['recipient_phone_number'],
-            $row['message_body'],
+            $livePhone,
+            $liveMessage,
             true,
             NULL
         );
@@ -179,23 +329,39 @@ function processSmsAlerts(PDO $pdo): array
         if (!empty($result['success'])) {
             $pdo->prepare("
                 UPDATE sms_notifications
-                   SET status = 'Sent',
+                   SET recipient_name = :rname,
+                       recipient_phone_number = :rphone,
+                       message_body = :msg,
+                       status = 'Sent',
                        sent_at = NOW(),
                        attempt_count = attempt_count + 1,
-                       error_message = NULL
+                       error_message = NULL,
+                       updated_at = NOW()
                  WHERE notification_id = CAST(:nid AS BIGINT)
-            ")->execute([':nid' => $row['notification_id']]);
+            ")->execute([
+                ':rname'  => $liveRecipientName,
+                ':rphone' => $livePhone,
+                ':msg'    => $liveMessage,
+                ':nid'    => $row['notification_id'],
+            ]);
             $stats['sent']++;
         } else {
             $pdo->prepare("
                 UPDATE sms_notifications
-                   SET status = 'Failed',
+                   SET recipient_name = :rname,
+                       recipient_phone_number = :rphone,
+                       message_body = :msg,
+                       status = 'Failed',
                        attempt_count = attempt_count + 1,
-                       error_message = :err
+                       error_message = :err,
+                       updated_at = NOW()
                  WHERE notification_id = CAST(:nid AS BIGINT)
             ")->execute([
-                ':nid' => $row['notification_id'],
-                ':err' => $result['error'] ?? 'Unknown error',
+                ':rname'  => $liveRecipientName,
+                ':rphone' => $livePhone,
+                ':msg'    => $liveMessage,
+                ':nid'    => $row['notification_id'],
+                ':err'    => $result['error'] ?? 'Unknown error',
             ]);
             $stats['failed']++;
         }
@@ -290,6 +456,10 @@ function isAutoSendSmsEnabled(PDO $pdo): bool
 //   per_page - Number of rows per page, default is 25 and maximum is 100
 function statusesSmsAlerts(PDO $pdo, array $options = []): array
 {
+    // Sync Pending/Failed rows first so the UI always displays up-to-date
+    // phone numbers, names, and statuses even when auto-send is turned off.
+    syncQueuedSmsAlerts($pdo);
+
     $type     = $options['type']     ?? 'Lease Expiring';
     $status   = $options['status']   ?? null;
     $stage    = $options['stage']    ?? null;
@@ -417,12 +587,12 @@ function statusesSmsAlerts(PDO $pdo, array $options = []): array
 
     return [
         'summary' => [
-            'by_status'       => $byStatus,
-            'by_stage'        => $byStage,
-            'sent_today'      => $sentToday,
-            'daily_cap'       => (int)SMS_MAX_DAILY_SENDS,
-            'remaining_today' => max(0, (int)SMS_MAX_DAILY_SENDS - $sentToday),
-            'auto_send_enabled' => isAutoSendSmsEnabled($pdo)
+            'by_status'         => $byStatus,
+            'by_stage'          => $byStage,
+            'sent_today'        => $sentToday,
+            'daily_cap'         => (int)SMS_MAX_DAILY_SENDS,
+            'remaining_today'   => max(0, (int)SMS_MAX_DAILY_SENDS - $sentToday),
+            'auto_send_enabled' => isAutoSendSmsEnabled($pdo),
         ],
         'rows'       => $rows,
         'pagination' => [
@@ -440,14 +610,99 @@ function statusesSmsAlerts(PDO $pdo, array $options = []): array
     ];
 }
 
-// Flip a Failed (or Skipped) row back to Pending and reset the attempt counter.
+// ---- Recipient & Message Refresh Helpers ----------------------------------
+
+function syncNotificationRecipient(PDO $pdo, int $notificationId): bool
+{
+    $stmt = $pdo->prepare("
+        UPDATE sms_notifications s
+           SET recipient_name         = i.contact_person_name,
+               recipient_phone_number = COALESCE(TRIM(i.contact_person_phone_number), ''),
+               message_body           = CASE
+                   WHEN s.notification_type = 'Lease Expiring' THEN
+                       CONCAT(
+                           'Reminder: The lease for ',
+                           i.deceased_name,
+                           ' at the cemetery is due on ',
+                           TO_CHAR(s.lease_expiration_date_at_send::date, 'YYYY-MM-DD'),
+                           '. Please contact the office.'
+                       )
+                   ELSE s.message_body
+               END,
+               updated_at             = NOW()
+          FROM interments i
+         WHERE s.notification_id = CAST(:nid AS BIGINT)
+           AND s.interment_id    = i.interment_id
+           AND i.deleted_at IS NULL
+    ");
+    $stmt->execute([':nid' => $notificationId]);
+    return $stmt->rowCount() > 0;
+}
+
+function syncRetryableRecipients(PDO $pdo, array $statuses): int
+{
+    if (empty($statuses)) {
+        return 0;
+    }
+
+    $placeholders = [];
+    $params       = [];
+    foreach (array_values($statuses) as $i => $s) {
+        $ph             = ':st_' . $i;
+        $placeholders[] = $ph;
+        $params[$ph]    = $s;
+    }
+    $inList = implode(', ', $placeholders);
+
+    $stmt = $pdo->prepare("
+        UPDATE sms_notifications s
+           SET recipient_name         = i.contact_person_name,
+               recipient_phone_number = COALESCE(TRIM(i.contact_person_phone_number), ''),
+               message_body           = CASE
+                   WHEN s.notification_type = 'Lease Expiring' THEN
+                       CONCAT(
+                           'Reminder: The lease for ',
+                           i.deceased_name,
+                           ' at the cemetery is due on ',
+                           TO_CHAR(s.lease_expiration_date_at_send::date, 'YYYY-MM-DD'),
+                           '. Please contact the office.'
+                       )
+                   ELSE s.message_body
+               END,
+               updated_at             = NOW()
+          FROM interments i
+         WHERE s.interment_id = i.interment_id
+           AND i.deleted_at IS NULL
+           AND s.status IN ({$inList})
+           AND (
+                 COALESCE(s.recipient_phone_number, '') <> COALESCE(TRIM(i.contact_person_phone_number), '')
+              OR COALESCE(s.recipient_name, '')         <> COALESCE(i.contact_person_name, '')
+              OR (
+                  s.notification_type = 'Lease Expiring'
+                  AND s.message_body <> CONCAT(
+                      'Reminder: The lease for ',
+                      i.deceased_name,
+                      ' at the cemetery is due on ',
+                      TO_CHAR(s.lease_expiration_date_at_send::date, 'YYYY-MM-DD'),
+                      '. Please contact the office.'
+                  )
+              )
+           )
+    ");
+    $stmt->execute($params);
+    return $stmt->rowCount();
+}
+
+// Flip a Failed (or Skipped) row back to Pending, reset the attempt counter,
+// and immediately sync latest contact details and lease validity from interments.
 function retrySmsAlert(PDO $pdo, int $notificationId): array
 {
     $stmt = $pdo->prepare("
         UPDATE sms_notifications
            SET status        = 'Pending',
                attempt_count = 0,
-               error_message = NULL
+               error_message = NULL,
+               updated_at    = NOW()
          WHERE notification_id = CAST(:id AS BIGINT)
            AND status IN ('Failed', 'Skipped')
     ");
@@ -456,21 +711,24 @@ function retrySmsAlert(PDO $pdo, int $notificationId): array
     if ($stmt->rowCount() === 0) {
         return ['success' => false, 'error' => 'Row not retryable (not Failed or Skipped, or not found).'];
     }
+
+    syncQueuedSmsAlerts($pdo);
+
     return ['success' => true, 'notification_id' => $notificationId];
 }
 
-// Cancel a single Pending row (mark Skipped). Sent rows can't be cancelled
+// Cancel a single Pending row (mark Skipped). Sent rows can't be cancelled.
 function cancelSmsAlert(PDO $pdo, int $notificationId, int $userId): array
 {
     // Preserve the original error if this was a Failed row — the user
     // needs the failure reason to make an informed decision later.
     //
     // PostgreSQL: IF() is MySQL-only; CASE WHEN ... END is the portable
-    // equivalent. CONCAT() already ignores NULLs in PG, but the CASE keeps
-    // the "append only when there was a prior error" logic intact.
+    // equivalent.
     $stmt = $pdo->prepare("
         UPDATE sms_notifications
            SET status = 'Skipped',
+               updated_at = NOW(),
                error_message = CONCAT(
                    'Cancelled by user #', CAST(:uid AS TEXT), ' at ', CAST(:ts AS TEXT),
                    CASE
@@ -503,7 +761,8 @@ function cancelAllPendingSmsAlerts(PDO $pdo, int $userId): array
     $stmt = $pdo->prepare("
         UPDATE sms_notifications
            SET status        = 'Skipped',
-               error_message = :reason
+               error_message = :reason,
+               updated_at    = NOW()
          WHERE status = 'Pending'
     ");
     $stmt->execute([
@@ -512,30 +771,56 @@ function cancelAllPendingSmsAlerts(PDO $pdo, int $userId): array
     return ['success' => true, 'cancelled' => $stmt->rowCount()];
 }
 
-// Bulk retry: every Failed row under the retry cap → Pending with attempt_count reset
+// Bulk retry: every Failed row → Pending with attempt_count reset and live data synced
 function retryAllFailedSmsAlerts(PDO $pdo): array
 {
     $stmt = $pdo->prepare("
         UPDATE sms_notifications
            SET status        = 'Pending',
                attempt_count = 0,
-               error_message = NULL
+               error_message = NULL,
+               updated_at    = NOW()
          WHERE status = 'Failed'
     ");
     $stmt->execute();
-    return ['success' => true, 'retried' => $stmt->rowCount()];
+    $retried = $stmt->rowCount();
+
+    $refreshed = 0;
+    if ($retried > 0) {
+        $syncStats = syncQueuedSmsAlerts($pdo);
+        $refreshed = $syncStats['synced'];
+    }
+
+    return [
+        'success'              => true,
+        'retried'              => $retried,
+        'recipients_refreshed' => $refreshed,
+    ];
 }
 
-// Bulk retry: every Skipped row → Pending with attempt_count reset
+// Bulk retry: every Skipped row → Pending with attempt_count reset and live data synced
 function retryAllSkippedSmsAlerts(PDO $pdo): array
 {
     $stmt = $pdo->prepare("
         UPDATE sms_notifications
            SET status        = 'Pending',
                attempt_count = 0,
-               error_message = NULL
+               error_message = NULL,
+               updated_at    = NOW()
          WHERE status = 'Skipped'
     ");
     $stmt->execute();
-    return ['success' => true, 'retried' => $stmt->rowCount()];
+    $retried = $stmt->rowCount();
+
+    $refreshed = 0;
+    if ($retried > 0) {
+        $syncStats = syncQueuedSmsAlerts($pdo);
+        $refreshed = $syncStats['synced'];
+    }
+
+    return [
+        'success'              => true,
+        'retried'              => $retried,
+        'recipients_refreshed' => $refreshed,
+    ];
 }
