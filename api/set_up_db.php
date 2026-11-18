@@ -4,7 +4,18 @@ require_once 'database.php'; // Make sure this path points to your database conn
 $sql = <<<'SQL'
 
 -- =====================================================================
--- SHARED TRIGGER FUNCTION  (emulates MySQL ON UPDATE CURRENT_TIMESTAMP)
+-- NUKE: drop everything, rebuild an empty schema
+-- =====================================================================
+DROP SCHEMA IF EXISTS public CASCADE;
+CREATE SCHEMA public;
+
+-- Make sure the app user can actually create objects.
+-- On PG 15+ 'public' no longer grants CREATE to PUBLIC by default.
+GRANT ALL ON SCHEMA public TO PUBLIC;
+
+
+-- =====================================================================
+-- SHARED TRIGGER FUNCTION
 -- =====================================================================
 CREATE OR REPLACE FUNCTION set_updated_at()
 RETURNS TRIGGER LANGUAGE plpgsql AS $$
@@ -18,7 +29,7 @@ $$;
 -- =====================================================================
 -- USERS
 -- =====================================================================
-CREATE TABLE IF NOT EXISTS users (
+CREATE TABLE users (
     user_id SERIAL PRIMARY KEY,
     username VARCHAR(50) NOT NULL,
     role VARCHAR(50) NOT NULL DEFAULT 'Grounds Staff'
@@ -36,11 +47,10 @@ CREATE TABLE IF NOT EXISTS users (
     created_by INT NULL REFERENCES users(user_id) ON DELETE SET NULL,
     updated_by INT NULL REFERENCES users(user_id) ON DELETE SET NULL
 );
-CREATE UNIQUE INDEX IF NOT EXISTS uk_active_username ON users (username) WHERE deleted_at IS NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS uk_active_email    ON users (email)    WHERE deleted_at IS NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS uk_active_phone    ON users (phone_number) WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX uk_active_username ON users (username)     WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX uk_active_email    ON users (email)        WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX uk_active_phone    ON users (phone_number) WHERE deleted_at IS NULL;
 
-DROP TRIGGER IF EXISTS trg_users_updated_at ON users;
 CREATE TRIGGER trg_users_updated_at
     BEFORE UPDATE ON users
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
@@ -49,7 +59,7 @@ CREATE TRIGGER trg_users_updated_at
 -- =====================================================================
 -- BLOCKS
 -- =====================================================================
-CREATE TABLE IF NOT EXISTS blocks (
+CREATE TABLE blocks (
     block_id SERIAL PRIMARY KEY,
     block_name VARCHAR(100) NOT NULL,
     block_type VARCHAR(50) NOT NULL
@@ -68,9 +78,8 @@ CREATE TABLE IF NOT EXISTS blocks (
     created_by INT NULL REFERENCES users(user_id) ON DELETE SET NULL,
     updated_by INT NULL REFERENCES users(user_id) ON DELETE SET NULL
 );
-CREATE UNIQUE INDEX IF NOT EXISTS uk_active_block_name ON blocks (block_name) WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX uk_active_block_name ON blocks (block_name) WHERE deleted_at IS NULL;
 
-DROP TRIGGER IF EXISTS trg_blocks_updated_at ON blocks;
 CREATE TRIGGER trg_blocks_updated_at
     BEFORE UPDATE ON blocks
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
@@ -79,7 +88,7 @@ CREATE TRIGGER trg_blocks_updated_at
 -- =====================================================================
 -- GRAVES
 -- =====================================================================
-CREATE TABLE IF NOT EXISTS graves (
+CREATE TABLE graves (
     grave_id SERIAL PRIMARY KEY,
     block_id INT NOT NULL REFERENCES blocks(block_id) ON DELETE RESTRICT,
     grave_code VARCHAR(50) NOT NULL,
@@ -94,9 +103,8 @@ CREATE TABLE IF NOT EXISTS graves (
     created_by INT NULL REFERENCES users(user_id) ON DELETE SET NULL,
     updated_by INT NULL REFERENCES users(user_id) ON DELETE SET NULL
 );
-CREATE UNIQUE INDEX IF NOT EXISTS uk_active_grave_code ON graves (grave_code) WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX uk_active_grave_code ON graves (grave_code) WHERE deleted_at IS NULL;
 
-DROP TRIGGER IF EXISTS trg_graves_updated_at ON graves;
 CREATE TRIGGER trg_graves_updated_at
     BEFORE UPDATE ON graves
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
@@ -105,7 +113,7 @@ CREATE TRIGGER trg_graves_updated_at
 -- =====================================================================
 -- INTERMENTS
 -- =====================================================================
-CREATE TABLE IF NOT EXISTS interments (
+CREATE TABLE interments (
     interment_id SERIAL PRIMARY KEY,
     control_number VARCHAR(100) NOT NULL,
     deceased_name VARCHAR(255) NOT NULL,
@@ -144,10 +152,9 @@ CREATE TABLE IF NOT EXISTS interments (
     updated_by INT NULL REFERENCES users(user_id) ON DELETE SET NULL,
     CONSTRAINT chk_status_grave CHECK (status = 'Active' OR current_grave_id IS NULL)
 );
-CREATE UNIQUE INDEX IF NOT EXISTS uk_active_control_number
+CREATE UNIQUE INDEX uk_active_control_number
     ON interments (control_number) WHERE deleted_at IS NULL;
 
-DROP TRIGGER IF EXISTS trg_interments_updated_at ON interments;
 CREATE TRIGGER trg_interments_updated_at
     BEFORE UPDATE ON interments
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
@@ -156,7 +163,7 @@ CREATE TRIGGER trg_interments_updated_at
 -- =====================================================================
 -- RESERVATIONS
 -- =====================================================================
-CREATE TABLE IF NOT EXISTS reservations (
+CREATE TABLE reservations (
     reservation_id SERIAL PRIMARY KEY,
     pending_interment_id INT NOT NULL REFERENCES interments(interment_id) ON DELETE RESTRICT,
     target_grave_id INT NOT NULL REFERENCES graves(grave_id) ON DELETE RESTRICT,
@@ -192,14 +199,13 @@ CREATE TABLE IF NOT EXISTS reservations (
         old_new_grave_id IS NULL OR old_new_grave_id <> target_grave_id
     )
 );
-CREATE UNIQUE INDEX IF NOT EXISTS uk_active_pending_interment
+CREATE UNIQUE INDEX uk_active_pending_interment
     ON reservations (pending_interment_id) WHERE reservation_state = 'Active';
-CREATE UNIQUE INDEX IF NOT EXISTS uk_active_target_grave
+CREATE UNIQUE INDEX uk_active_target_grave
     ON reservations (target_grave_id)      WHERE reservation_state = 'Active';
-CREATE UNIQUE INDEX IF NOT EXISTS uk_active_old_interment
+CREATE UNIQUE INDEX uk_active_old_interment
     ON reservations (old_interment_id)     WHERE reservation_state = 'Active';
 
-DROP TRIGGER IF EXISTS trg_reservations_updated_at ON reservations;
 CREATE TRIGGER trg_reservations_updated_at
     BEFORE UPDATE ON reservations
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
@@ -208,7 +214,7 @@ CREATE TRIGGER trg_reservations_updated_at
 -- =====================================================================
 -- PLACEMENT HISTORY  (append-only: no updated_at)
 -- =====================================================================
-CREATE TABLE IF NOT EXISTS placement_history (
+CREATE TABLE placement_history (
     history_id SERIAL PRIMARY KEY,
     interment_id INT NOT NULL REFERENCES interments(interment_id) ON DELETE RESTRICT,
     event_type VARCHAR(20) NOT NULL
@@ -229,7 +235,7 @@ CREATE TABLE IF NOT EXISTS placement_history (
 -- =====================================================================
 -- SETTINGS
 -- =====================================================================
-CREATE TABLE IF NOT EXISTS settings (
+CREATE TABLE settings (
     setting_id SERIAL PRIMARY KEY,
     setting_key VARCHAR(50) NOT NULL,
     setting_value TEXT,
@@ -240,10 +246,9 @@ CREATE TABLE IF NOT EXISTS settings (
     created_by INT NULL REFERENCES users(user_id) ON DELETE SET NULL,
     updated_by INT NULL REFERENCES users(user_id) ON DELETE SET NULL
 );
-CREATE UNIQUE INDEX IF NOT EXISTS uk_active_setting_key
+CREATE UNIQUE INDEX uk_active_setting_key
     ON settings (setting_key) WHERE deleted_at IS NULL;
 
-DROP TRIGGER IF EXISTS trg_settings_updated_at ON settings;
 CREATE TRIGGER trg_settings_updated_at
     BEFORE UPDATE ON settings
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
@@ -252,7 +257,7 @@ CREATE TRIGGER trg_settings_updated_at
 -- =====================================================================
 -- PAYMENTS
 -- =====================================================================
-CREATE TABLE IF NOT EXISTS payments (
+CREATE TABLE payments (
     payment_id SERIAL PRIMARY KEY,
     reference_number VARCHAR(100) NOT NULL,
     payment_channel VARCHAR(100) NOT NULL,
@@ -274,19 +279,18 @@ CREATE TABLE IF NOT EXISTS payments (
     created_by INT NULL REFERENCES users(user_id) ON DELETE SET NULL,
     updated_by INT NULL REFERENCES users(user_id) ON DELETE SET NULL
 );
-CREATE UNIQUE INDEX IF NOT EXISTS uk_active_reference_number
+CREATE UNIQUE INDEX uk_active_reference_number
     ON payments (reference_number) WHERE deleted_at IS NULL;
 
-DROP TRIGGER IF EXISTS trg_payments_updated_at ON payments;
 CREATE TRIGGER trg_payments_updated_at
     BEFORE UPDATE ON payments
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 
 -- =====================================================================
--- SMS_NOTIFICATIONS  (append-only log; no deleted_at)
+-- SMS_NOTIFICATIONS
 -- =====================================================================
-CREATE TABLE IF NOT EXISTS sms_notifications (
+CREATE TABLE sms_notifications (
     notification_id SERIAL PRIMARY KEY,
     interment_id INT NOT NULL REFERENCES interments(interment_id) ON DELETE RESTRICT,
     notification_type VARCHAR(30) NOT NULL DEFAULT 'Lease Expiring'
@@ -309,17 +313,13 @@ CREATE TABLE IF NOT EXISTS sms_notifications (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Dedup only among 'Sent' rows. COALESCE turns NULL into a sentinel so the
--- index also prevents duplicate SUCCESSFUL sends for manual / lease-less
--- reminders (matches the old MySQL active_sent_key behaviour).
-CREATE UNIQUE INDEX IF NOT EXISTS uk_active_sent_key ON sms_notifications (
+CREATE UNIQUE INDEX uk_active_sent_key ON sms_notifications (
     interment_id,
     notification_type,
     COALESCE(lease_expiration_date_at_send, DATE '0001-01-01'),
     COALESCE(days_before_expiry, -1)
 ) WHERE status = 'Sent';
 
-DROP TRIGGER IF EXISTS trg_sms_notifications_updated_at ON sms_notifications;
 CREATE TRIGGER trg_sms_notifications_updated_at
     BEFORE UPDATE ON sms_notifications
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
@@ -328,58 +328,47 @@ CREATE TRIGGER trg_sms_notifications_updated_at
 -- =====================================================================
 -- INDEXES
 -- =====================================================================
+CREATE INDEX idx_users_deleted_at     ON users(deleted_at);
+CREATE INDEX idx_users_session_token  ON users(session_token);
 
--- Users
-CREATE INDEX IF NOT EXISTS idx_users_deleted_at     ON users(deleted_at);
-CREATE INDEX IF NOT EXISTS idx_users_session_token  ON users(session_token);
+CREATE INDEX idx_blocks_deleted_at    ON blocks(deleted_at);
 
--- Blocks
-CREATE INDEX IF NOT EXISTS idx_blocks_deleted_at    ON blocks(deleted_at);
+CREATE INDEX idx_graves_block_id      ON graves(block_id);
+CREATE INDEX idx_graves_status        ON graves(status);
+CREATE INDEX idx_graves_block_status  ON graves(block_id, status);
+CREATE INDEX idx_graves_deleted_at    ON graves(deleted_at);
 
--- Graves
-CREATE INDEX IF NOT EXISTS idx_graves_block_id      ON graves(block_id);
-CREATE INDEX IF NOT EXISTS idx_graves_status        ON graves(status);
-CREATE INDEX IF NOT EXISTS idx_graves_block_status  ON graves(block_id, status);
-CREATE INDEX IF NOT EXISTS idx_graves_deleted_at    ON graves(deleted_at);
+CREATE INDEX idx_interments_current_grave_id ON interments(current_grave_id);
+CREATE INDEX idx_interments_status           ON interments(status);
+CREATE INDEX idx_interments_deceased_name    ON interments(deceased_name);
+CREATE INDEX idx_interments_lease_expiration ON interments(lease_expiration_date);
+CREATE INDEX idx_interments_status_grave     ON interments(status, current_grave_id);
+CREATE INDEX idx_interments_date_buried      ON interments(date_buried);
+CREATE INDEX idx_interments_deleted_at       ON interments(deleted_at);
 
--- Interments
-CREATE INDEX IF NOT EXISTS idx_interments_current_grave_id ON interments(current_grave_id);
-CREATE INDEX IF NOT EXISTS idx_interments_status           ON interments(status);
-CREATE INDEX IF NOT EXISTS idx_interments_deceased_name    ON interments(deceased_name);
-CREATE INDEX IF NOT EXISTS idx_interments_lease_expiration ON interments(lease_expiration_date);
-CREATE INDEX IF NOT EXISTS idx_interments_status_grave     ON interments(status, current_grave_id);
-CREATE INDEX IF NOT EXISTS idx_interments_date_buried      ON interments(date_buried);
-CREATE INDEX IF NOT EXISTS idx_interments_deleted_at       ON interments(deleted_at);
+CREATE INDEX idx_reservations_state             ON reservations(reservation_state);
+CREATE INDEX idx_reservations_target_grave      ON reservations(target_grave_id);
+CREATE INDEX idx_reservations_old_interment     ON reservations(old_interment_id);
+CREATE INDEX idx_reservations_pending_interment ON reservations(pending_interment_id);
+CREATE INDEX idx_reservations_state_target      ON reservations(reservation_state, target_grave_id);
+CREATE INDEX idx_reservations_created_at        ON reservations(created_at);
 
--- Reservations
-CREATE INDEX IF NOT EXISTS idx_reservations_state             ON reservations(reservation_state);
-CREATE INDEX IF NOT EXISTS idx_reservations_target_grave      ON reservations(target_grave_id);
-CREATE INDEX IF NOT EXISTS idx_reservations_old_interment     ON reservations(old_interment_id);
-CREATE INDEX IF NOT EXISTS idx_reservations_pending_interment ON reservations(pending_interment_id);
-CREATE INDEX IF NOT EXISTS idx_reservations_state_target      ON reservations(reservation_state, target_grave_id);
-CREATE INDEX IF NOT EXISTS idx_reservations_created_at        ON reservations(created_at);
+CREATE INDEX idx_history_interment_id      ON placement_history(interment_id);
+CREATE INDEX idx_history_event_date        ON placement_history(event_date);
+CREATE INDEX idx_history_interment_date    ON placement_history(interment_id, event_date);
+CREATE INDEX idx_history_from_grave        ON placement_history(from_grave_id);
+CREATE INDEX idx_history_to_grave          ON placement_history(to_grave_id);
+CREATE INDEX idx_history_reservation       ON placement_history(reservation_id);
+CREATE INDEX idx_history_related_interment ON placement_history(related_interment_id);
 
--- Placement history
-CREATE INDEX IF NOT EXISTS idx_history_interment_id      ON placement_history(interment_id);
-CREATE INDEX IF NOT EXISTS idx_history_event_date        ON placement_history(event_date);
-CREATE INDEX IF NOT EXISTS idx_history_interment_date    ON placement_history(interment_id, event_date);
-CREATE INDEX IF NOT EXISTS idx_history_from_grave        ON placement_history(from_grave_id);
-CREATE INDEX IF NOT EXISTS idx_history_to_grave          ON placement_history(to_grave_id);
-CREATE INDEX IF NOT EXISTS idx_history_reservation       ON placement_history(reservation_id);
-CREATE INDEX IF NOT EXISTS idx_history_related_interment ON placement_history(related_interment_id);
+CREATE INDEX idx_settings_deleted_at ON settings(deleted_at);
+CREATE INDEX idx_payments_deleted_at ON payments(deleted_at);
 
--- Settings
-CREATE INDEX IF NOT EXISTS idx_settings_deleted_at ON settings(deleted_at);
-
--- Payments
-CREATE INDEX IF NOT EXISTS idx_payments_deleted_at ON payments(deleted_at);
-
--- SMS
-CREATE INDEX IF NOT EXISTS idx_sms_notifications_interment  ON sms_notifications(interment_id);
-CREATE INDEX IF NOT EXISTS idx_sms_notifications_status     ON sms_notifications(status);
-CREATE INDEX IF NOT EXISTS idx_sms_notifications_type_sent  ON sms_notifications(notification_type, sent_at);
-CREATE INDEX IF NOT EXISTS idx_sms_notifications_lease_date ON sms_notifications(lease_expiration_date_at_send);
-CREATE INDEX IF NOT EXISTS idx_sms_notifications_stage      ON sms_notifications(days_before_expiry);
+CREATE INDEX idx_sms_notifications_interment  ON sms_notifications(interment_id);
+CREATE INDEX idx_sms_notifications_status     ON sms_notifications(status);
+CREATE INDEX idx_sms_notifications_type_sent  ON sms_notifications(notification_type, sent_at);
+CREATE INDEX idx_sms_notifications_lease_date ON sms_notifications(lease_expiration_date_at_send);
+CREATE INDEX idx_sms_notifications_stage      ON sms_notifications(days_before_expiry);
 
 
 -- =====================================================================
@@ -397,11 +386,9 @@ COMMENT ON TABLE sms_notifications IS 'PAST. Append-only log of every SMS attemp
 
 
 -- =====================================================================
--- SEED DATA  (idempotent — safe to re-run)
+-- SEED DATA
 -- =====================================================================
 
--- Default admin. Password below is the existing hash from the original
--- schema; leave as-is or change it via the app.
 INSERT INTO users
     (user_id, username, role, status, email, phone_number,
      password_hash, name, session_token,
@@ -410,12 +397,10 @@ VALUES
     (1, 'admin', 'Administrator', 'Verified', 'admin@gmail.com', '+639293456789',
      '$2y$12$YtdLBOCGz5.WcnxtHGPBx.eg4yRaijZUBMOYuw9GVAxkp670BXW0y',
      'Administrator', NULL,
-     '2026-10-11 01:37:40', '2026-10-11 01:37:57', NULL, NULL, NULL)
-ON CONFLICT DO NOTHING;
+     '2026-10-11 01:37:40', '2026-10-11 01:37:57', NULL, NULL, NULL);
 
-SELECT setval('users_user_id_seq', (SELECT COALESCE(MAX(user_id), 1) FROM users));
+SELECT setval('users_user_id_seq', (SELECT MAX(user_id) FROM users));
 
--- Default settings
 INSERT INTO settings
     (setting_id, setting_key, setting_value, description,
      created_at, updated_at, deleted_at, created_by, updated_by)
@@ -442,10 +427,9 @@ VALUES
 (35, 'people_title_2', 'Admin Division Chief', 'Report Signatory 2 Title', '2026-10-11 19:09:11', '2026-10-11 19:09:20', NULL, 1, 1),
 (36, 'cemetery_map_images', 'cemetery_map_image.png', 'For the cemetery map backgound image', '2026-11-04 22:50:13', '2026-11-04 22:50:13', NULL, 1, 1),
 (37, 'barangay_options', '["Alang-alang", "Bakilid", "Banilad", "Basak", "Cabancalan", "Cambaro", "Canduman", "Casuntingan", "Casili", "Centro", "Cubacub", "Guizo", "Ibabao-Estancia", "Jagobiao", "Labogon", "Looc", "Maguikay", "Mantuyong", "Opao", "Pakna-an", "Pagsabungan", "Subangdaku", "Tabok", "Tingub", "Tipolo", "Umapad"]', 'Barangay Options', '2026-11-04 22:50:13', '2026-11-04 22:50:13', NULL, 1, 1),
-(38, 'auto_send_sms_expiring', '0', 'Enable SMS Automation alerts every 2 mins', '2026-11-19 01:13:00', '2026-11-19 01:13:05', NULL, 1, 1)
-ON CONFLICT DO NOTHING;
+(38, 'auto_send_sms_expiring', '0', 'Enable SMS Automation alerts every 2 mins', '2026-11-19 01:13:00', '2026-11-19 01:13:05', NULL, 1, 1);
 
-SELECT setval('settings_setting_id_seq', (SELECT COALESCE(MAX(setting_id), 1) FROM settings));
+SELECT setval('settings_setting_id_seq', (SELECT MAX(setting_id) FROM settings));
 
 -- REALISTIC DUMMY DATA:
 INSERT INTO blocks (block_id, block_name, block_type, image_link, coordinates, rows, cols, rotation, remarks, deleted_at, created_by, updated_by) VALUES (1, 'Block A', 'Niche', 'https://lh3.googleusercontent.com/pw/AP1GczPm8PoMTq8qseByrs9OFdn1PQxXTjSVp2-4zdU_dPqfgbL_7MP2VHg7M9xO4oTsMxRpy5jAcK3Hs--jiOBX8-R44gjfW9s8BRhvWZDujo_Zl0hVw4CScO0tTzO3TDKZ4TWOiVxPEQD9pD5D8oIujUMj=w1380-h777-s-no-gm?authuser=0', '[{"x": 44, "y": 108}, {"x": 141, "y": 108}, {"x": 141, "y": 383}, {"x": 44, "y": 383}]', 26, 26, '0.000000', NULL, NULL, 1, 1);
